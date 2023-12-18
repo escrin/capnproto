@@ -32,7 +32,6 @@
 #include "io.h"
 #include "cidr.h"
 #include "miniposix.h"
-#include <cstdlib>
 #include <kj/compat/gtest.h>
 #include <kj/time.h>
 #include <sys/types.h>
@@ -379,12 +378,11 @@ TEST(AsyncIo, VmSocket) {
 
   char receiveBuffer[4];
 
-  int port = (std::rand() / static_cast<double>(RAND_MAX)) * (0xffff - 1024) + 1024;
-  KJ_CONTEXT(port); // print the port if the test fails
+  int port = ((getpid() >> 10) % (0xffff - 1024 + 1)) + 1024; // wrap to dynamic port range
   auto ready = newPromiseAndFulfiller<void>();
 
   ready.promise.then([&]() {
-    return network.parseAddress(kj::str("vsock:2:", port));
+    return network.parseAddress(kj::str("vsock:3:", port));
   }).then([&](Own<NetworkAddress>&& addr) {
     auto promise = addr->connect();
     return promise.then([&,addr=kj::mv(addr)](auto result) mutable {
@@ -395,7 +393,7 @@ TEST(AsyncIo, VmSocket) {
     KJ_FAIL_EXPECT(exception);
   });
 
-  kj::String result = network.parseAddress(kj::str("vsock:2:", port))
+  kj::String result = network.parseAddress(kj::str("vsock:3:", port))
       .then([&](Own<NetworkAddress>&& result) {
     listener = result->listen();
     ready.fulfiller->fulfill();
