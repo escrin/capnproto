@@ -32,6 +32,7 @@
 #include "io.h"
 #include "cidr.h"
 #include "miniposix.h"
+#include <cstdlib>
 #include <kj/compat/gtest.h>
 #include <kj/time.h>
 #include <sys/types.h>
@@ -378,7 +379,8 @@ TEST(AsyncIo, VmSocket) {
 
   char receiveBuffer[4];
 
-  int port = ((getpid() >> 10) % (0xffff - 1024 + 1)) + 1024; // wrap to dynamic port range
+  int port = (std::rand() / static_cast<double>(RAND_MAX)) * (0xffff - 1024) + 1024;
+  KJ_CONTEXT(port); // print the port if the test fails
   auto ready = newPromiseAndFulfiller<void>();
 
   ready.promise.then([&]() {
