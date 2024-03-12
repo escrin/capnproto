@@ -60,6 +60,7 @@
 
 #if __linux__
 #include <sys/sendfile.h>
+#include <linux/vm_sockets.h>
 #endif
 
 #if !defined(SO_PEERCRED) && defined(LOCAL_PEERCRED)
@@ -985,6 +986,11 @@ public:
           return str("unix:", path);
         }
       }
+#if __linux__
+      case AF_VSOCK: {
+        return str("vsock:", addr.vsock.svm_cid, ":", addr.vsock.svm_port);
+      }
+#endif
       default:
         return str("(unknown address family ", addr.generic.sa_family, ")");
     }
@@ -1042,6 +1048,33 @@ public:
       array.add(result);
       return array.finish();
     }
+
+#if __linux__
+    if (str.startsWith("vsock:")) {
+      StringPtr path = str.slice(strlen("vsock:"));
+
+      char* endptr;
+      unsigned int cid = strtoul(path.cStr(), &endptr, 0);
+      KJ_REQUIRE(*endptr == ':', "missing vsock port");
+      unsigned int port = strtoul(endptr + 1, &endptr, 0);
+      KJ_REQUIRE(*endptr == '\0', "invalid vsock addr");
+
+      memset(&result.addr.vsock, 0, sizeof(result.addr.vsock));
+      result.addr.vsock.svm_family = AF_VSOCK;
+      result.addr.vsock.svm_cid = cid;
+      result.addr.vsock.svm_port = port;
+      result.addrlen = sizeof(struct sockaddr_vm);
+
+      if (!result.parseAllowedBy(filter)) {
+        KJ_FAIL_REQUIRE("VM sockets blocked by restrictPeers()");
+        return Array<SocketAddress>();
+      }
+
+      auto array = kj::heapArrayBuilder<SocketAddress>(1);
+      array.add(result);
+      return array.finish();
+    }
+#endif
 
     // Try to separate the address and port.
     ArrayPtr<const char> addrPart;
@@ -1195,6 +1228,9 @@ private:
     struct sockaddr_in inet4;
     struct sockaddr_in6 inet6;
     struct sockaddr_un unixDomain;
+#if __linux__
+    struct sockaddr_vm vsock;
+#endif
     struct sockaddr_storage storage;
   } addr;
 
@@ -1474,10 +1510,8 @@ public:
 
 class LowLevelAsyncIoProviderImpl final: public LowLevelAsyncIoProvider {
 public:
-  LowLevelAsyncIoProviderImpl()
-      : eventPort(), eventLoop(eventPort), waitScope(eventLoop) {}
-
-  inline WaitScope& getWaitScope() { return waitScope; }
+  LowLevelAsyncIoProviderImpl(UnixEventPort& eventPort)
+      : eventPort(eventPort) {}
 
   Own<AsyncInputStream> wrapInputFd(int fd, uint flags = 0) override {
     return heap<AsyncStreamFd>(eventPort, fd, flags, UnixEventPort::FdObserver::OBSERVE_READ);
@@ -1539,12 +1573,8 @@ public:
 
   Timer& getTimer() override { return eventPort.getTimer(); }
 
-  UnixEventPort& getEventPort() { return eventPort; }
-
 private:
-  UnixEventPort eventPort;
-  EventLoop eventLoop;
-  WaitScope waitScope;
+  UnixEventPort& eventPort;
 };
 
 // =======================================================================================
@@ -2031,10 +2061,13 @@ public:
     auto pipe = lowLevel.wrapSocketFd(fds[0], NEW_FD_FLAGS);
 
     auto thread = heap<Thread>([threadFd,startFunc=kj::mv(startFunc)]() mutable {
-      LowLevelAsyncIoProviderImpl lowLevel;
+      UnixEventPort eventPort;
+      EventLoop eventLoop(eventPort);
+      WaitScope waitScope(eventLoop);
+      LowLevelAsyncIoProviderImpl lowLevel(eventPort);
       auto stream = lowLevel.wrapSocketFd(threadFd, NEW_FD_FLAGS);
       AsyncIoProviderImpl ioProvider(lowLevel);
-      startFunc(ioProvider, *stream, lowLevel.getWaitScope());
+      startFunc(ioProvider, *stream, waitScope);
     });
 
     return { kj::mv(thread), kj::mv(pipe) };
@@ -2053,11 +2086,32 @@ Own<AsyncIoProvider> newAsyncIoProvider(LowLevelAsyncIoProvider& lowLevel) {
   return kj::heap<AsyncIoProviderImpl>(lowLevel);
 }
 
+Own<LowLevelAsyncIoProvider> newLowLevelAsyncIoProvider(UnixEventPort& eventPort) {
+  return kj::heap<LowLevelAsyncIoProviderImpl>(eventPort);
+}
+
 AsyncIoContext setupAsyncIo() {
-  auto lowLevel = heap<LowLevelAsyncIoProviderImpl>();
+  struct BasicContext {
+    UnixEventPort eventPort;
+    EventLoop eventLoop;
+    WaitScope waitScope;
+
+    BasicContext(): eventLoop(eventPort), waitScope(eventLoop) {}
+  };
+
+  auto basicContext = heap<BasicContext>();
+  auto lowLevel = heap<LowLevelAsyncIoProviderImpl>(basicContext->eventPort);
   auto ioProvider = kj::heap<AsyncIoProviderImpl>(*lowLevel);
-  auto& waitScope = lowLevel->getWaitScope();
-  auto& eventPort = lowLevel->getEventPort();
+  auto& waitScope = basicContext->waitScope;
+  auto& eventPort = basicContext->eventPort;
+
+  // Historically, `LowLevelAsyncIoProviderImpl` contained the stuff that `BasicContext` now
+  // contains. However, this made it impossible to create more elaborate EventLoop arrangements
+  // while still using the default LLAIOP implementation. For backwards-compatibility,
+  // `setupAsyncIo()` still attaches this context to the LLAIOP, but it's now possible to construct
+  // these objects directly and LLAIOP on top.
+  lowLevel = lowLevel.attach(kj::mv(basicContext));
+
   return { kj::mv(lowLevel), kj::mv(ioProvider), waitScope, eventPort };
 }
 

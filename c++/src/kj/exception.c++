@@ -37,7 +37,6 @@
 #include "exception.h"
 #include "string.h"
 #include "debug.h"
-#include "threadlocal.h"
 #include "miniposix.h"
 #include "function.h"
 #include "main.h"
@@ -256,7 +255,7 @@ ArrayPtr<void* const> getStackTrace(ArrayPtr<void*> space, uint ignoreCount) {
 
 #if (__GNUC__ && !_WIN32) || __clang__
 // Allow dependents to override the implementation of stack symbolication by making it a weak
-// symbol. We prefer weak symbols over some sort of callback registration mechanism becasue this
+// symbol. We prefer weak symbols over some sort of callback registration mechanism because this
 // allows an alternate symbolication library to be easily linked into tests without changing the
 // code of the test.
 __attribute__((weak))
@@ -919,7 +918,7 @@ void Exception::addTraceHere() {
 
 namespace {
 
-KJ_THREADLOCAL_PTR(ExceptionImpl) currentException = nullptr;
+thread_local ExceptionImpl* currentException = nullptr;
 
 void validateExceptionPointer(const ExceptionImpl* e) noexcept {
   // Occasionally in production we are seeing `currentException` have the value 1. Try to figure
@@ -1013,7 +1012,7 @@ kj::Exception getDestructionReason(void* traceSeparator, kj::Exception::Type def
 
 namespace {
 
-KJ_THREADLOCAL_PTR(ExceptionCallback) threadLocalCallback = nullptr;
+thread_local ExceptionCallback* threadLocalCallback = nullptr;
 
 }  // namespace
 
